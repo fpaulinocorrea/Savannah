@@ -2,7 +2,7 @@
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import BackgroundTasks, Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
@@ -22,7 +22,7 @@ from .auth import (
     slow_down,
     start_session,
 )
-from .db import Draft, LoginSession, delete_setting, get_setting, init_db, set_setting, utcnow
+from .db import ConvoState, Draft, LoginSession, delete_setting, engine, get_setting, init_db, set_setting, utcnow
 from .hospitable import Hospitable, HospitableAuthError, HospitableError
 from .netinfo import phone_urls
 
@@ -294,13 +294,32 @@ def _when(iso: str) -> float:
         return 0.0
 
 
+def _states(db: Session) -> dict[str, ConvoState]:
+    return {x.reservation_id: x for x in db.exec(select(ConvoState)).all()}
+
+
+def _inbox_flags(msgs: list[dict], st: ConvoState | None) -> tuple[bool, bool]:
+    """(needs_reply, archived) for one conversation.
+    Needs reply: the last message is the guest's and you haven't marked it as replied.
+    Archived: you archived it and the guest hasn't written since."""
+    last = msgs[-1]
+    guest = [m for m in msgs if m["role"] == "guest"]
+    last_guest = guest[-1] if guest else None
+    needs = last["role"] == "guest" and not (st and st.handled_message_id and st.handled_message_id == last_guest["id"])
+    archived = False
+    if st and st.archived_at:
+        archived = not (last_guest and _when(last_guest["at"]) > st.archived_at.replace(tzinfo=st.archived_at.tzinfo or timezone.utc).timestamp())
+    return needs, archived
+
+
 @app.get("/api/guests/inbox")
-def inbox(view: str = "all", q: str = "", offset: int = 0, db: Session = Depends(require_login)):
-    """Every conversation, newest message first (like Hospitable's inbox)."""
+def inbox(view: str = "inbox", q: str = "", offset: int = 0, db: Session = Depends(require_login)):
+    """Every conversation, newest message first. view = inbox | archived."""
     open_drafts = {
         d.reservation_id: d
         for d in db.exec(select(Draft).where(Draft.status.in_(["drafting", "ready", "error"]))).all()
     }
+    states = _states(db)
     rows = []
     for convo in conversations.load_all():
         msgs = convo.get("messages") or []
@@ -309,20 +328,61 @@ def inbox(view: str = "all", q: str = "", offset: int = 0, db: Session = Depends
         r = convo["reservation"]
         last = msgs[-1]
         d = open_drafts.get(r["id"])
+        needs, archived = _inbox_flags(msgs, states.get(r["id"]))
         rows.append({
             "reservation_id": r["id"], "guest_name": r.get("guest_name", ""), "photo": r.get("photo", ""), "property_name": r.get("property_name", ""),
             "platform": r.get("platform", ""), "arrival": r.get("arrival", ""), "departure": r.get("departure", ""),
             "last_role": last["role"], "last_body": last["body"][:160], "last_at": last["at"],
-            "needs_reply": last["role"] == "guest", "draft_status": d.status if d else "", "kind": r.get("kind", "stay"),
+            "needs_reply": needs, "archived": archived,
+            "draft_status": d.status if d and needs else "", "kind": r.get("kind", "stay"),
         })
-    waiting = sum(1 for x in rows if x["needs_reply"])
+    waiting = sum(1 for x in rows if x["needs_reply"] and not x["archived"])
+    archived_count = sum(1 for x in rows if x["archived"])
+    rows = [x for x in rows if x["archived"] == (view == "archived")]
     if view == "waiting":
         rows = [x for x in rows if x["needs_reply"]]
     if q:
         ql = q.lower()
         rows = [x for x in rows if ql in x["guest_name"].lower() or ql in x["property_name"].lower()]
     rows.sort(key=lambda x: _when(x["last_at"]), reverse=True)
-    return {"total": len(rows), "waiting": waiting, "items": rows[offset : offset + 60]}
+    return {"total": len(rows), "waiting": waiting, "archived": archived_count, "items": rows[offset : offset + 60]}
+
+
+class StateBody(BaseModel):
+    ids: list[str]
+    action: str  # archive | unarchive | replied | unreplied
+
+
+@app.post("/api/guests/state")
+def set_state(body: StateBody, db: Session = Depends(require_login)):
+    """Archive / move back to inbox / mark as replied — one conversation or many."""
+    if body.action not in ("archive", "unarchive", "replied", "unreplied"):
+        raise HTTPException(422, "Unknown action.")
+    states = _states(db)
+    changed = 0
+    for rid in body.ids[:2000]:
+        convo = conversations.load(rid)
+        if not convo:
+            continue
+        st = states.get(rid) or ConvoState(reservation_id=rid)
+        guest = [m for m in convo.get("messages", []) if m["role"] == "guest"]
+        if body.action in ("archive", "replied"):
+            if guest:
+                st.handled_message_id = guest[-1]["id"]  # archiving also means "done with it"
+            for d in db.exec(select(Draft).where(Draft.reservation_id == rid, Draft.status.in_(["drafting", "ready", "error"]))).all():
+                d.status, d.updated_at = "skipped", utcnow()
+                db.add(d)
+        if body.action == "archive":
+            st.archived_at = utcnow()
+        elif body.action == "unarchive":
+            st.archived_at = None
+        elif body.action == "unreplied":
+            st.handled_message_id = ""
+        st.updated_at = utcnow()
+        db.add(st)
+        changed += 1
+    db.commit()
+    return {"ok": True, "changed": changed}
 
 
 def _conversation_json(reservation_id: str) -> dict:
@@ -330,10 +390,16 @@ def _conversation_json(reservation_id: str) -> dict:
     if not convo:
         raise HTTPException(404, "Conversation not found.")
     d = sync.open_draft_for(reservation_id)
+    needs, archived = False, False
+    if convo["messages"]:
+        with Session(engine) as db:
+            needs, archived = _inbox_flags(convo["messages"], db.get(ConvoState, reservation_id))
     return {
         "reservation": convo["reservation"],
         "messages": convo["messages"][-200:],
         "draft": _draft_json(d) if d else None,
+        "needs_reply": needs,
+        "archived": archived,
     }
 
 
@@ -410,7 +476,7 @@ async def improve(reservation_id: str, body: ImproveBody, db: Session = Depends(
 
 
 @app.post("/api/guests/conversation/{reservation_id}/suggest")
-def suggest(reservation_id: str, db: Session = Depends(require_login)):
+async def suggest(reservation_id: str, db: Session = Depends(require_login)):
     if not get_setting(db, "claude_key"):
         raise HTTPException(409, "Add your Claude key in Settings first.")
     draft_id = sync.draft_on_request(reservation_id)

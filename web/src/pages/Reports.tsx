@@ -2,21 +2,23 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   ArrowDownLeft, ArrowUpRight, Bookmark, CalendarClock, ChevronDown, ChevronRight, CircleAlert, Download,
-  Landmark, Printer, RefreshCw, Save, Scale, TrendingUp, Waves, X,
+  Landmark, LineChart, Printer, RefreshCw, Save, Scale, TrendingUp, Waves, X,
 } from 'lucide-react'
 import { CircleCheck } from 'lucide-react'
 import {
   api, ApiError, money, shortDate, stayDates, platformName,
   type BalanceSheet, type Booking, type CashFlow, type Detail, type PL, type ReportConfig, type ReportRow, type ReportSection, type SavedView, type Upcoming,
 } from '../api'
+import CashForecast from './CashForecast'
 
-type ReportKey = 'pl' | 'cashflow' | 'bs' | 'upcoming'
+type ReportKey = 'pl' | 'cashflow' | 'bs' | 'upcoming' | 'forecast'
 
 const REPORTS: { key: ReportKey; label: string; icon: typeof Scale }[] = [
   { key: 'pl', label: 'Profit & Loss', icon: Scale },
   { key: 'cashflow', label: 'Cash flow', icon: Waves },
   { key: 'bs', label: 'Balance sheet', icon: Landmark },
   { key: 'upcoming', label: 'Coming income', icon: CalendarClock },
+  { key: 'forecast', label: 'Cash forecast', icon: LineChart },
 ]
 
 // ---------- date ranges ----------
@@ -109,6 +111,7 @@ export default function Reports() {
       {report === 'cashflow' && <CashFlowReport cfg={cfg} />}
       {report === 'bs' && <BalanceSheetReport />}
       {report === 'upcoming' && <ComingIncome />}
+      {report === 'forecast' && <CashForecast />}
     </div>
   )
 }
@@ -177,7 +180,7 @@ function SavedViews({ report, views, setViews, cfg, apply }: {
   async function save() {
     if (!name.trim()) return setErr('Give this layout a name.')
     try {
-      const v = await api.saveView(name, report, cfg)
+      const v = await api.saveView(name, report as SavedView['report'], cfg)
       setViews([...views.filter((x) => x.id !== v.id), v])
       setNaming(false)
       setName('')

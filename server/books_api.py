@@ -450,6 +450,7 @@ def remove_plaid(db: Session = Depends(require_login)):
 
 class LinkBody(BaseModel):
     item_id: str = ""
+    products: list[str] = []  # extra permissions to ask for in update mode, e.g. ["liabilities"]
 
 
 @router.post("/api/plaid/link-token")
@@ -464,7 +465,8 @@ async def make_link_token(body: LinkBody, db: Session = Depends(require_login)):
     elif plaid.items_used(db) >= plaid.item_limit(db):
         raise HTTPException(409, f"You've used all {plaid.item_limit(db)} free Plaid connections. Adding another needs a paid Plaid plan.")
     try:
-        return {"link_token": await plaid.link_token(client_id, secret, access)}
+        extra = [p for p in body.products if p in ("liabilities",)] if access else None
+        return {"link_token": await plaid.link_token(client_id, secret, access, extra)}
     except plaid.PlaidError as e:
         raise HTTPException(502, str(e))
 
@@ -483,6 +485,7 @@ async def exchange(body: ExchangeBody, db: Session = Depends(require_login)):
             link.error = ""
             db.add(link)
             db.commit()
+        delete_setting(db, plaid.CARD_BILLS_KEY)  # ask the bank for card bills again
     else:
         try:
             await plaid.connect(body.public_token, body.institution)
@@ -493,10 +496,11 @@ async def exchange(body: ExchangeBody, db: Session = Depends(require_login)):
 
 
 @router.post("/api/books/sync")
-def sync_now(db: Session = Depends(require_login)):
+async def sync_now(db: Session = Depends(require_login)):
     client_id, secret = plaid.keys(db)
     if not (client_id and secret):
         raise HTTPException(409, "Add your Plaid keys in Settings first.")
+    plaid.state["syncing"] = True  # so the screen shows "Updating…" straight away
     _background(plaid.sync_all())
     return {"ok": True}
 

@@ -305,6 +305,38 @@ def jetson_deposit_2026(db: Session) -> str:
     return f"done: transaction {t.id} → {target.name}"
 
 
+def forecast_choices_2026_11(db: Session) -> str:
+    """Cash forecast choices Felipe made on Nov 17, 2026:
+    cleaning $200 per checkout at The Craftsman House, $110 at the Cottage; Chase card = statement balance,
+    Home Depot card = minimum payment; leave out general repairs and bank fees."""
+    import json
+
+    from . import forecast, reports
+    from .ledger import BankAccount
+
+    if get_setting(db, forecast.CHOICES_KEY):
+        return "skipped: choices already saved"
+    choices = {"cards": {}, "categories": {}, "cleaning": {}}
+    for b in db.exec(select(BankAccount)).all():
+        if b.type == "credit":
+            if b.mask == "3572":
+                choices["cards"][b.id] = "statement"
+            elif b.mask == "8997" or "home depot" in b.name.lower():
+                choices["cards"][b.id] = "minimum"
+    for a in db.exec(select(LedgerAccount)).all():
+        leaf = a.name.split(":")[-1].strip().lower()
+        if a.name.strip().lower() == "repairs & maintenance" or "bank fee" in leaf:
+            choices["categories"][str(a.id)] = "off"
+    props = {b.get("property_name", "") for b in (reports.load_bookings() or {}).get("bookings", [])}
+    for p in props:
+        if "craftsman" in p.lower():
+            choices["cleaning"][p] = 20000
+        elif "cottage" in p.lower():
+            choices["cleaning"][p] = 11000
+    set_setting(db, forecast.CHOICES_KEY, json.dumps(choices))
+    return f"done: {len(choices['cards'])} cards, {len(choices['categories'])} left out, {len(choices['cleaning'])} houses"
+
+
 FIXUPS = [
     ("card_3572_is_qb_card_2026_11", card_3572_is_qb_card_2026_11),  # first: the heat pump charge moves
     ("heat_pump_2026_11", heat_pump_2026_11),
@@ -315,6 +347,7 @@ FIXUPS = [
     ("appliances_may_2026", appliances_may_2026),
     ("best_buy_range_2026", best_buy_range_2026),
     ("jetson_deposit_2026", jetson_deposit_2026),
+    ("forecast_choices_2026_11", forecast_choices_2026_11),
 ]
 
 

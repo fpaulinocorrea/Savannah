@@ -7,9 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from . import reports
+from . import forecast, reports
 from .auth import require_login
-from .db import engine, get_setting
+from .db import engine, get_setting, set_setting
 from .hospitable import Hospitable, HospitableError, is_cancelled, reservation_summary
 
 router = APIRouter()
@@ -93,8 +93,8 @@ async def _fetch_bookings(token: str) -> list[dict]:
     return rows
 
 
-@router.get("/api/reports/upcoming")
-async def upcoming(refresh: bool = False, db: Session = Depends(require_login)):
+async def _bookings(db: Session, refresh: bool) -> tuple[str | None, dict | None, str]:
+    """Upcoming bookings (a 30-minute copy is kept). Returns (token, cached, error)."""
     token = get_setting(db, "hospitable_token")
     cached = reports.load_bookings()
     fresh_enough = False
@@ -108,6 +108,12 @@ async def upcoming(refresh: bool = False, db: Session = Depends(require_login)):
         except HospitableError as e:
             error = str(e)
         cached = reports.load_bookings()
+    return token, cached, error
+
+
+@router.get("/api/reports/upcoming")
+async def upcoming(refresh: bool = False, db: Session = Depends(require_login)):
+    token, cached, error = await _bookings(db, refresh)
     if not token and not cached:
         raise HTTPException(409, "Connect Hospitable in Settings to see income from upcoming bookings.")
     rows = (cached or {}).get("bookings", [])
@@ -128,6 +134,51 @@ async def upcoming(refresh: bool = False, db: Session = Depends(require_login)):
         "total_cents": sum(b["payout_cents"] or 0 for b in rows),
         "missing": sum(1 for b in rows if b["payout_cents"] is None),
     }
+
+
+# ---------- cash forecast ----------
+
+FORECAST_MIN_KEY = "forecast_min_cents"
+FORECAST_MIN_DEFAULT = 100000  # $1,000 until you pick your own
+
+
+@router.get("/api/reports/forecast")
+async def cash_forecast(refresh: bool = False, db: Session = Depends(require_login)):
+    _, cached, error = await _bookings(db, refresh)
+    from . import plaid
+
+    bills = await plaid.card_bills(db, force=refresh)
+    data = forecast.build(db, date.today(), (cached or {}).get("bookings", []), bills=bills, choices=forecast.load_choices(db))
+    data["bills_fetched_at"] = bills.get("fetched_at")
+    saved = get_setting(db, FORECAST_MIN_KEY)
+    data["min_cents"] = int(saved) if saved not in (None, "") else FORECAST_MIN_DEFAULT
+    data["bookings_saved_at"] = (cached or {}).get("saved_at")
+    data["bookings_error"] = error
+    data["hospitable_connected"] = bool(cached)
+    return data
+
+
+class MinBody(BaseModel):
+    cents: int
+
+
+@router.post("/api/reports/forecast/minimum")
+def set_forecast_min(body: MinBody, db: Session = Depends(require_login)):
+    if body.cents < 0 or body.cents > 100_000_000:
+        raise HTTPException(422, "Pick an amount between $0 and $1,000,000.")
+    set_setting(db, FORECAST_MIN_KEY, str(body.cents))
+    return {"min_cents": body.cents}
+
+
+class ChoicesBody(BaseModel):
+    cards: dict[str, str] = {}
+    categories: dict[str, str] = {}
+    cleaning: dict[str, int | None] = {}
+
+
+@router.post("/api/reports/forecast/choices")
+def set_forecast_choices(body: ChoicesBody, db: Session = Depends(require_login)):
+    return forecast.save_choices(db, body.model_dump())
 
 
 # ---------- saved layouts ----------

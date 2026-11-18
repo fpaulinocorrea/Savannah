@@ -69,17 +69,7 @@ export default function Books() {
         </section>
       )}
 
-      {hasBank && (
-        <div className="sync-line">
-          <span className={`chip ${s.last_error ? 'chip-bad' : 'chip-good'}`}>
-            {s.last_error ? <CircleAlert size={16} aria-hidden="true" /> : <span className="dot" />}
-            {s.last_error || (s.syncing ? 'Getting new transactions from your banks…' : s.last_sync_at ? `Updated ${timeAgo(s.last_sync_at)}` : 'Not updated yet since restart')}
-          </span>
-          <button className="btn btn-small" disabled={s.syncing} onClick={() => api.syncBank().then(() => setTimeout(load, 400)).catch(() => {})}>
-            <RefreshCw size={16} aria-hidden="true" /> Update now
-          </button>
-        </div>
-      )}
+      {hasBank && <SyncLine s={s} setS={setS} onDone={refreshAll} />}
 
       {hasChart && hasBank && <ChaseCheck tick={tick} onChange={load} />}
 
@@ -464,6 +454,67 @@ function AddBank({ s, onDone }: { s: BooksSummary; onDone: () => void }) {
         ? <ConnectBank small label="Connect" onDone={onDone} />
         : <small className="error">All free connections used</small>}
       {left > 0 && left <= 3 && <small className="muted">Each new bank login uses one for good, even if removed later.</small>}
+    </div>
+  )
+}
+
+
+// ---------- Update now: spins until the banks are really done ----------
+
+function SyncLine({ s, setS, onDone }: { s: BooksSummary; setS: (x: BooksSummary) => void; onDone: () => void }) {
+  const [updating, setUpdating] = useState(false)
+  const [done, setDone] = useState('')
+  const [err, setErr] = useState('')
+  const busy = updating || s.syncing
+
+  async function update() {
+    const before = s.last_sync_at
+    setUpdating(true)
+    setDone('')
+    setErr('')
+    try {
+      await api.syncBank()
+    } catch (e) {
+      setErr((e as ApiError).message)
+      setUpdating(false)
+      return
+    }
+    const started = Date.now()
+    const check = async () => {
+      try {
+        const x = await api.books()
+        setS(x)
+        const finished = !x.syncing && x.last_sync_at !== before
+        if (finished || Date.now() - started > 180_000) {
+          setUpdating(false)
+          onDone()
+          if (finished && !x.last_error) {
+            const n = x.last_result?.new ?? 0
+            setDone(n === 0 ? 'Up to date. No new transactions.' : `Done. ${n} new transaction${n === 1 ? '' : 's'}.`)
+            setTimeout(() => setDone(''), 8000)
+          }
+          return
+        }
+      } catch { /* keep trying */ }
+      setTimeout(check, 1500)
+    }
+    setTimeout(check, 1200)
+  }
+
+  return (
+    <div className="sync-line" aria-live="polite">
+      <span className={`chip ${s.last_error && !busy ? 'chip-bad' : busy ? 'chip-busy' : 'chip-good'}`}>
+        {busy
+          ? <RefreshCw size={16} aria-hidden="true" className="spin" />
+          : s.last_error ? <CircleAlert size={16} aria-hidden="true" /> : <span className="dot" />}
+        {busy
+          ? 'Updating transactions and balances…'
+          : done || s.last_error || (s.last_sync_at ? `Updated ${timeAgo(s.last_sync_at)}` : 'Not updated yet since restart')}
+      </span>
+      <button className="btn btn-small" disabled={busy} onClick={update} aria-busy={busy}>
+        <RefreshCw size={16} aria-hidden="true" className={busy ? 'spin' : ''} /> {busy ? 'Updating…' : 'Update now'}
+      </button>
+      {err && <span className="error small" role="alert">{err}</span>}
     </div>
   )
 }

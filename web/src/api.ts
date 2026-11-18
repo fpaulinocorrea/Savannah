@@ -47,12 +47,15 @@ export type Message = { id: string; role: 'guest' | 'host'; body: string; at: st
 export type InboxRow = {
   reservation_id: string; guest_name: string; property_name: string; platform: string; photo?: string
   arrival: string; departure: string; last_role: 'guest' | 'host'; last_body: string; last_at: string
-  needs_reply: boolean; draft_status: '' | 'drafting' | 'ready' | 'error'; kind?: 'stay' | 'inquiry'
+  needs_reply: boolean; archived: boolean; draft_status: '' | 'drafting' | 'ready' | 'error'; kind?: 'stay' | 'inquiry'
 }
+export type ConvoAction = 'archive' | 'unarchive' | 'replied' | 'unreplied'
 export type Conversation = {
   reservation: { id: string; guest_name: string; property_name: string; platform: string; arrival: string; departure: string; status: string; kind?: 'stay' | 'inquiry'; photo?: string }
   messages: Message[]
   draft: Draft | null
+  needs_reply: boolean
+  archived: boolean
 }
 
 export function whenShort(iso: string) {
@@ -125,6 +128,34 @@ export type Upcoming = {
   months: { month: string; count: number; payout_cents: number; missing: number }[]
   total_cents: number; missing: number
 }
+export type ForecastKind = 'income' | 'card' | 'fixed' | 'cost'
+export type ForecastEvent = { date: string; kind: ForecastKind; label: string; cents: number }
+export type Forecast = {
+  today: string; end: string; weeks: number; as_of: string | null; start_cents: number; accounts: string[]
+  history: { date: string; cents: number }[]
+  events: ForecastEvent[]
+  last_year_range: [string, string]
+  min_cents: number
+  bookings_saved_at: string | null; bookings_error: string; hospitable_connected: boolean
+  sources: {
+    income: { count: number; cents: number }
+    cards: {
+      id: string; item_id: string; name: string; balance_cents: number | null; mode: CardMode
+      average_cents: number | null; day: number | null
+      bill: { statement_cents: number | null; minimum_cents: number | null; due_date: string | null; statement_date: string | null } | null
+      bill_problem: { kind: 'permission' | 'plaid' | 'bank' | 'wait' | 'other'; message: string } | null
+      last_payments: { date: string; cents: number }[]
+      schedule: { date: string; cents: number; why: string }[]
+    }[]
+    fixed: { label: string; cents: number; day: number }[]
+    costs: { id: number; name: string; cents: number; mode: CostMode; new: boolean; count: number }[]
+    cleaning: { property: string; cents: number | null; count: number; total_cents: number }[]
+    moved_to_card: string[]
+  }
+}
+export type CardMode = 'statement' | 'minimum' | 'average'
+export type CostMode = 'last_year' | 'recent' | 'off'
+export type ForecastChoices = { cards?: Record<string, CardMode>; categories?: Record<string, CostMode>; cleaning?: Record<string, number | null> }
 export type BalanceSheet = {
   dates: string[]; columns: string[]; sections: (ReportSection & { side: 'assets' | 'liabilities' | 'equity' })[]
   totals: { assets: number[]; liabilities: number[]; equity: number[] }; balanced: boolean; liabilities_and_equity: number[]
@@ -195,10 +226,11 @@ export const api = {
   guests: () => request<GuestsInfo>('GET', '/guests'),
   checkNow: () => request('POST', '/guests/check'),
   learn: () => request('POST', '/guests/learn'),
-  inbox: (view: 'all' | 'waiting', q = '', offset = 0) =>
-    request<{ total: number; waiting: number; items: InboxRow[] }>(
+  inbox: (view: 'inbox' | 'archived', q = '', offset = 0) =>
+    request<{ total: number; waiting: number; archived: number; items: InboxRow[] }>(
       'GET', `/guests/inbox?view=${view}&q=${encodeURIComponent(q)}&offset=${offset}`,
     ),
+  convoState: (ids: string[], action: ConvoAction) => request<{ ok: boolean; changed: number }>('POST', '/guests/state', { ids, action }),
   conversation: (reservationId: string, fresh = false) =>
     request<Conversation>('GET', `/guests/conversation/${encodeURIComponent(reservationId)}${fresh ? '?fresh=true' : ''}`),
   reply: (reservationId: string, text: string) =>
@@ -239,6 +271,9 @@ export const api = {
     request<PL>('GET', `/reports/pl?start=${c.start}&end=${c.end}&breakdown=${c.breakdown}&compare=${c.compare}`),
   cashflow: (c: ReportConfig) => request<CashFlow>('GET', `/reports/cashflow?start=${c.start}&end=${c.end}&breakdown=${c.breakdown}`),
   upcoming: (refresh = false) => request<Upcoming>('GET', `/reports/upcoming${refresh ? '?refresh=true' : ''}`),
+  forecast: (refresh = false) => request<Forecast>('GET', `/reports/forecast${refresh ? '?refresh=true' : ''}`),
+  setForecastChoices: (c: ForecastChoices) => request('POST', '/reports/forecast/choices', c),
+  setForecastMin: (cents: number) => request<{ min_cents: number }>('POST', '/reports/forecast/minimum', { cents }),
   balanceSheet: (asOf: string, compare: string) => request<BalanceSheet>('GET', `/reports/balance-sheet?as_of=${asOf}&compare=${compare}`),
   detail: (report: 'pl' | 'cashflow' | 'bs', path: string, start: string, end: string) =>
     request<Detail>('GET', `/reports/detail?report=${report}&path=${encodeURIComponent(path)}&start=${start}&end=${end}`),
@@ -254,7 +289,7 @@ export const api = {
   mapBank: (id: string, ledger_account_id: number) => request('POST', `/books/bank-accounts/${id}`, { ledger_account_id }),
   savePlaid: (client_id: string, secret: string) => request<TestResult>('POST', '/connections/plaid', { client_id, secret }),
   removePlaid: () => request('DELETE', '/connections/plaid'),
-  plaidLinkToken: (item_id = '') => request<{ link_token: string }>('POST', '/plaid/link-token', { item_id }),
+  plaidLinkToken: (item_id = '', products: string[] = []) => request<{ link_token: string }>('POST', '/plaid/link-token', { item_id, products }),
   plaidExchange: (public_token: string, institution: string, reconnected_item = '') =>
     request('POST', '/plaid/exchange', { public_token, institution, reconnected_item }),
   readStatement: async (txnId: number, file: File) => {

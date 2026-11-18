@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { ArrowLeft, Check, CircleAlert, MessageCircle, RefreshCw, Search, Send, Sparkles, Undo2 } from 'lucide-react'
+import { Archive, ArchiveRestore, ArrowLeft, Check, CheckCheck, CircleAlert, MessageCircle, RefreshCw, Search, Send, Sparkles, Undo2 } from 'lucide-react'
 import {
   api, ApiError, messageTime, platformName, stayDates, timeAgo, whenShort,
-  type Conversation, type GuestsInfo, type InboxRow,
+  type ConvoAction, type Conversation, type GuestsInfo, type InboxRow,
 } from '../api'
 
 // The Guests inbox: every conversation, newest first. On a computer the list and the
@@ -14,6 +14,7 @@ export default function Guests() {
   const [error, setError] = useState('')
   const [bump, setBump] = useState(0)  // changes whenever the list should refresh now
   const refreshList = useCallback(() => setBump((n) => n + 1), [])
+  const [listActs, setListActs] = useState(0)  // archive / replied from the list: the open conversation re-reads
 
   const loadInfo = useCallback(() => {
     api.guests().then((g) => { setInfo(g); setError('') }).catch((e: ApiError) => setError(e.message))
@@ -42,9 +43,9 @@ export default function Guests() {
 
       {info.hospitable_connected && (
         <div className="inbox-layout">
-          <InboxList openId={id} bump={bump} />
+          <InboxList openId={id} bump={bump} onChanged={() => { loadInfo(); setListActs((n) => n + 1) }} />
           <div className="convo-pane">
-            {id ? <ConversationView key={id} id={id} claudeReady={info.claude_connected} onChanged={refreshList} /> : <PickOne />}
+            {id ? <ConversationView key={id} id={id} claudeReady={info.claude_connected} onChanged={refreshList} listActs={listActs} /> : <PickOne />}
           </div>
         </div>
       )}
@@ -63,10 +64,13 @@ function PickOne() {
 
 // ---------- the list ----------
 
-function InboxList({ openId, bump }: { openId?: string; bump: number }) {
-  const [view, setView] = useState<'all' | 'waiting'>('all')
+function InboxList({ openId, bump, onChanged }: { openId?: string; bump: number; onChanged: () => void }) {
+  const [view, setView] = useState<'inbox' | 'archived'>('inbox')
   const [q, setQ] = useState('')
-  const [data, setData] = useState<{ total: number; waiting: number; items: InboxRow[] } | null>(null)
+  const [data, setData] = useState<{ total: number; waiting: number; archived: number; items: InboxRow[] } | null>(null)
+  const [picked, setPicked] = useState<Set<string>>(new Set())
+  const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState('')
 
   const load = useCallback(() => {
     api.inbox(view, q).then(setData).catch(() => {})
@@ -77,32 +81,79 @@ function InboxList({ openId, bump }: { openId?: string; bump: number }) {
     const t = setInterval(load, 15000)
     return () => { clearTimeout(first); clearInterval(t) }
   }, [load, q, bump])
+  useEffect(() => { setPicked(new Set()) }, [view])
+
+  async function act(ids: string[], action: ConvoAction) {
+    if (!ids.length) return
+    setBusy(true)
+    try {
+      const r = await api.convoState(ids, action)
+      const what = { archive: 'archived', unarchive: 'moved to the inbox', replied: 'marked as replied', unreplied: 'marked as needing a reply' }[action]
+      setNote(`${r.changed} conversation${r.changed === 1 ? '' : 's'} ${what}.`)
+      setTimeout(() => setNote(''), 4000)
+      setPicked(new Set())
+      load()
+      onChanged()
+    } catch { setNote('That didn\'t work. Try again.') }
+    setBusy(false)
+  }
+
+  const items = data?.items ?? []
+  const toggle = (id: string) => setPicked((p) => { const n = new Set(p); if (n.has(id)) n.delete(id); else n.add(id); return n })
+  const allPicked = items.length > 0 && items.every((c) => picked.has(c.reservation_id))
+  const pickedNeeding = items.filter((c) => picked.has(c.reservation_id) && c.needs_reply).length
 
   return (
     <section className="inbox-list" aria-label="Conversations">
       <div className="inbox-tools">
         <div className="tabs tabs-small" role="tablist">
-          <button role="tab" aria-selected={view === 'all'} className={view === 'all' ? 'is-on' : ''} onClick={() => setView('all')}>All</button>
-          <button role="tab" aria-selected={view === 'waiting'} className={view === 'waiting' ? 'is-on' : ''} onClick={() => setView('waiting')}>
-            Needs reply {data && data.waiting > 0 && <span className="count">{data.waiting}</span>}
+          <button role="tab" aria-selected={view === 'inbox'} className={view === 'inbox' ? 'is-on' : ''} onClick={() => setView('inbox')}>
+            Inbox {data && data.waiting > 0 && <span className="count" title={`${data.waiting} need a reply`}>{data.waiting}</span>}
+          </button>
+          <button role="tab" aria-selected={view === 'archived'} className={view === 'archived' ? 'is-on' : ''} onClick={() => setView('archived')}>
+            <Archive size={15} aria-hidden="true" /> Archived {data && data.archived > 0 && <span className="count count-soft">{data.archived}</span>}
           </button>
         </div>
         <label className="search search-small">
           <Search size={16} aria-hidden="true" />
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Guest or home" aria-label="Search guest or home" />
         </label>
+        {items.length > 0 && (
+          <div className={`bulk-bar ${picked.size ? 'is-on' : ''}`}>
+            <label className="bulk-all">
+              <input type="checkbox" checked={allPicked} onChange={() => setPicked(allPicked ? new Set() : new Set(items.map((c) => c.reservation_id)))} />
+              {picked.size ? `${picked.size} selected` : 'Select all'}
+            </label>
+            {picked.size > 0 && (
+              <span className="bulk-actions">
+                {view === 'inbox' && pickedNeeding > 0 && (
+                  <button className="btn btn-small" disabled={busy} onClick={() => act([...picked], 'replied')}>
+                    <CheckCheck size={15} aria-hidden="true" /> Mark replied
+                  </button>
+                )}
+                {view === 'inbox'
+                  ? <button className="btn btn-small" disabled={busy} onClick={() => act([...picked], 'archive')}><Archive size={15} aria-hidden="true" /> Archive</button>
+                  : <button className="btn btn-small" disabled={busy} onClick={() => act([...picked], 'unarchive')}><ArchiveRestore size={15} aria-hidden="true" /> Move to inbox</button>}
+                <button className="link-btn" onClick={() => setPicked(new Set())}>Clear</button>
+              </span>
+            )}
+          </div>
+        )}
+        {note && <p className="success small" role="status"><Check size={15} aria-hidden="true" /> {note}</p>}
       </div>
 
-      {data && data.items.length === 0 && (
+      {data && items.length === 0 && (
         <div className="all-clear small-clear">
           <span className="all-clear-icon"><Check size={28} strokeWidth={2} aria-hidden="true" /></span>
-          <p className="muted">{view === 'waiting' ? 'All guests answered.' : q ? 'No matches.' : 'No conversations yet.'}</p>
+          <p className="muted">{q ? 'No matches.' : view === 'archived' ? 'Nothing archived yet.' : 'Inbox empty.'}</p>
         </div>
       )}
 
       <ul className="convo-list">
-        {data?.items.map((c) => (
-          <li key={c.reservation_id}>
+        {items.map((c) => (
+          <li key={c.reservation_id} className={`convo-li ${picked.has(c.reservation_id) ? 'is-picked' : ''}`}>
+            <input type="checkbox" className="convo-pick" checked={picked.has(c.reservation_id)} onChange={() => toggle(c.reservation_id)}
+              aria-label={`Select ${c.guest_name}`} />
             <Link to={`/guests/${c.reservation_id}`} className={`convo-row ${openId === c.reservation_id ? 'is-open' : ''} ${c.needs_reply ? 'is-waiting' : ''}`}>
               <Avatar name={c.guest_name} photo={c.photo} />
               <span className="convo-main">
@@ -120,6 +171,16 @@ function InboxList({ openId, bump }: { openId?: string; bump: number }) {
                 )}
               </span>
             </Link>
+            <span className="convo-acts">
+              {c.needs_reply && (
+                <button className="icon-act" disabled={busy} onClick={() => act([c.reservation_id], 'replied')} title="Mark as already replied" aria-label={`Mark ${c.guest_name} as already replied`}>
+                  <CheckCheck size={17} aria-hidden="true" />
+                </button>
+              )}
+              {view === 'inbox'
+                ? <button className="icon-act" disabled={busy} onClick={() => act([c.reservation_id], 'archive')} title="Archive" aria-label={`Archive ${c.guest_name}`}><Archive size={17} aria-hidden="true" /></button>
+                : <button className="icon-act" disabled={busy} onClick={() => act([c.reservation_id], 'unarchive')} title="Move to inbox" aria-label={`Move ${c.guest_name} to inbox`}><ArchiveRestore size={17} aria-hidden="true" /></button>}
+            </span>
           </li>
         ))}
       </ul>
@@ -132,7 +193,7 @@ function InboxList({ openId, bump }: { openId?: string; bump: number }) {
 
 // ---------- one conversation ----------
 
-function ConversationView({ id, claudeReady, onChanged }: { id: string; claudeReady: boolean; onChanged: () => void }) {
+function ConversationView({ id, claudeReady, onChanged, listActs }: { id: string; claudeReady: boolean; onChanged: () => void; listActs: number }) {
   const navigate = useNavigate()
   const [c, setC] = useState<Conversation | null>(null)
   const [error, setError] = useState('')
@@ -147,11 +208,21 @@ function ConversationView({ id, claudeReady, onChanged }: { id: string; claudeRe
     api.conversation(id, true).then((x) => { setC(x); setError(''); onChanged() }).catch((e: ApiError) => setError(e.message))
   }, [id, onChanged])
 
+  useEffect(() => { if (listActs) load(false) }, [listActs, load])
+
   const drafting = c?.draft?.status === 'drafting'
   useEffect(() => {
     const t = setInterval(() => load(false), drafting ? 2500 : 20000)
     return () => clearInterval(t)
   }, [load, drafting])
+
+  async function act(action: ConvoAction) {
+    try {
+      await api.convoState([id], action)
+      load(false)
+      onChanged()
+    } catch { /* the list shows the real state on its next refresh */ }
+  }
 
   const count = c?.messages.length ?? 0
   useEffect(() => { bottom.current?.scrollIntoView({ block: 'end' }) }, [count])
@@ -162,6 +233,7 @@ function ConversationView({ id, claudeReady, onChanged }: { id: string; claudeRe
 
   return (
     <article className="convo">
+      <div className="convo-top-bar">
       <header className="convo-head">
         <button className="link-btn convo-back" onClick={() => navigate('/guests')} aria-label="Back to inbox">
           <ArrowLeft size={18} aria-hidden="true" />
@@ -173,12 +245,26 @@ function ConversationView({ id, claudeReady, onChanged }: { id: string; claudeRe
         </div>
         <span className="platform">{platformName(r.platform)}</span>
       </header>
+      <div className="convo-head-acts">
+          {c.needs_reply && (
+            <button className="btn btn-small" onClick={() => act('replied')} title="Mark as already replied">
+              <CheckCheck size={15} aria-hidden="true" /> <span>Mark replied</span>
+            </button>
+          )}
+          {c.archived
+            ? <button className="btn btn-small" onClick={() => act('unarchive')} title="Move to inbox"><ArchiveRestore size={15} aria-hidden="true" /> <span>Move to inbox</span></button>
+            : <button className="btn btn-small" onClick={() => act('archive')} title="Archive"><Archive size={15} aria-hidden="true" /> <span>Archive</span></button>}
+      </div>
+      </div>
 
       <div className="convo-messages">
-        {c.messages.map((m) => (
+        {c.messages.map((m, i) => (
           <div key={m.id} className={`msg ${m.role === 'guest' ? 'msg-guest' : 'msg-you'}`}>
             <p className={`bubble ${m.role === 'guest' ? 'bubble-guest' : 'bubble-you'}`}>{m.body}</p>
-            <span className="msg-time">{m.role === 'host' ? 'You, ' : ''}{messageTime(m.at)}</span>
+            <span className="msg-time">
+              {m.role === 'host' ? 'You, ' : ''}{messageTime(m.at)}
+              {c.needs_reply && i === c.messages.length - 1 && <span className="tag-wait msg-tag">Needs reply</span>}
+            </span>
           </div>
         ))}
         <div ref={bottom} />

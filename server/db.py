@@ -47,6 +47,15 @@ class Draft(SQLModel, table=True):
     sent_at: datetime | None = None
 
 
+class ConvoState(SQLModel, table=True):
+    """What you decided about a conversation in Savannah's inbox."""
+
+    reservation_id: str = Field(primary_key=True)
+    archived_at: datetime | None = None  # hidden from the inbox (comes back if the guest writes again)
+    handled_message_id: str = ""  # the guest message you marked as "already replied"
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
 engine = create_engine(
     f"sqlite:///{config.DB_PATH}",
     connect_args={"check_same_thread": False},
@@ -109,5 +118,5 @@ def delete_setting(session: Session, key: str) -> None:
 
 __all__ = [
     "Session", "select", "engine", "init_db", "get_setting", "set_setting", "delete_setting",
-    "Setting", "LoginSession", "Draft", "utcnow",
+    "Setting", "LoginSession", "Draft", "ConvoState", "utcnow",
 ]

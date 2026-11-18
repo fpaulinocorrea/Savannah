@@ -67,15 +67,17 @@ async def call(client_id: str, secret: str, path: str, body: dict) -> dict:
     return data
 
 
-async def link_token(client_id: str, secret: str, access_token: str | None = None) -> str:
+async def link_token(client_id: str, secret: str, access_token: str | None = None, add_products: list[str] | None = None) -> str:
     body = {
         "user": {"client_user_id": "savannah-owner"},
         "client_name": "Savannah",
         "country_codes": ["US"],
         "language": "en",
     }
-    if access_token:  # "update mode": sign in to the bank again
+    if access_token:  # "update mode": sign in to the bank again, or allow more (e.g. card bills)
         body["access_token"] = access_token
+        if add_products:
+            body["additional_consented_products"] = add_products
     else:
         body["products"] = ["transactions"]
         body["transactions"] = {"days_requested": HISTORY_DAYS}
@@ -170,6 +172,79 @@ async def connect(public_token: str, institution: str) -> None:
         db.commit()
         accts = await call(client_id, secret, "/accounts/get", {"access_token": access_token})
         _save_accounts(db, item_id, accts.get("accounts", []), institution)
+
+
+# ---------- card bills (Plaid "Liabilities": statement balance, minimum, due date) ----------
+
+CARD_BILLS_KEY = "card_bills"
+CARD_BILLS_HOURS = 12
+
+BILL_ERRORS = {
+    "ADDITIONAL_CONSENT_REQUIRED": ("permission", "The bank needs your OK to share card bills with Savannah."),
+    "ACCESS_NOT_GRANTED": ("permission", "The bank needs your OK to share card bills with Savannah."),
+    "ITEM_LOGIN_REQUIRED": ("permission", "The bank needs you to sign in again."),
+    "INVALID_PRODUCT": ("plaid", "Card bills (Liabilities) aren't turned on for your Plaid account. Turn it on at dashboard.plaid.com, then press Update."),
+    "PRODUCTS_NOT_SUPPORTED": ("bank", "This bank doesn't share card bills through Plaid."),
+    "NO_LIABILITY_ACCOUNTS": ("bank", "This bank doesn't share card bills through Plaid."),
+    "PRODUCT_NOT_READY": ("wait", "The bank is still getting the card bill ready. Try again in a few minutes."),
+}
+
+
+def _cents(v) -> int | None:
+    return round(float(v) * 100) if isinstance(v, (int, float)) else None
+
+
+def saved_card_bills(db: Session) -> dict:
+    import json
+
+    raw = get_setting(db, CARD_BILLS_KEY)
+    try:
+        return json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+
+
+async def card_bills(db: Session, force: bool = False) -> dict:
+    """Next bill for each card, asked from the bank at most every 12 hours. Never raises."""
+    import json
+
+    from .db import set_setting
+
+    saved = saved_card_bills(db)
+    if saved.get("fetched_at") and not force:
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(saved["fetched_at"])
+        if age.total_seconds() < CARD_BILLS_HOURS * 3600:
+            return saved
+    client_id, secret = keys(db)
+    if not (client_id and secret):
+        return saved
+    cards = [b for b in db.exec(select(BankAccount)).all() if b.type == "credit" and not b.ignored]
+    out = {"fetched_at": datetime.now(timezone.utc).isoformat(), "cards": {}, "items": {}}
+    for item_id in sorted({b.item_id for b in cards}):
+        link = db.get(BankLink, item_id)
+        if not link:
+            continue
+        try:
+            data = await call(client_id, secret, "/liabilities/get", {"access_token": link.access_token})
+            for c in (data.get("liabilities") or {}).get("credit") or []:
+                out["cards"][c.get("account_id")] = {
+                    "statement_cents": _cents(c.get("last_statement_balance")),
+                    "minimum_cents": _cents(c.get("minimum_payment_amount")),
+                    "due_date": c.get("next_payment_due_date"),
+                    "statement_date": c.get("last_statement_issue_date"),
+                    "last_payment_cents": _cents(c.get("last_payment_amount")),
+                    "last_payment_date": c.get("last_payment_date"),
+                }
+            out["items"][item_id] = {"ok": True}
+        except PlaidError as e:
+            kind, msg = BILL_ERRORS.get(e.code, ("other", str(e)))
+            out["items"][item_id] = {"ok": False, "kind": kind, "message": msg, "code": e.code}
+            # Keep the last good numbers for this bank's cards.
+            for b in cards:
+                if b.item_id == item_id and b.id in saved.get("cards", {}):
+                    out["cards"][b.id] = saved["cards"][b.id]
+    set_setting(db, CARD_BILLS_KEY, json.dumps(out))
+    return out
 
 
 # ---------- syncing ----------

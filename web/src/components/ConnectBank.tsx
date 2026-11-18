@@ -26,7 +26,7 @@ function loadPlaid(): Promise<PlaidGlobal> {
   })
 }
 
-export default function ConnectBank({ itemId = '', label, onDone, small }: { itemId?: string; label: string; onDone: () => void; small?: boolean }) {
+export default function ConnectBank({ itemId = '', label, onDone, small, addProducts = [] }: { itemId?: string; label: string; onDone: () => void; small?: boolean; addProducts?: string[] }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -34,7 +34,7 @@ export default function ConnectBank({ itemId = '', label, onDone, small }: { ite
     setBusy(true)
     setError('')
     try {
-      const [{ link_token }, Plaid] = await Promise.all([api.plaidLinkToken(itemId), loadPlaid()])
+      const [{ link_token }, Plaid] = await Promise.all([api.plaidLinkToken(itemId, addProducts), loadPlaid()])
       Plaid.create({
         token: link_token,
         onSuccess: async (publicToken, metadata) => {

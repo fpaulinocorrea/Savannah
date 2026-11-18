@@ -180,6 +180,11 @@ async def _handle_conversation(summary: dict, messages: list[dict]) -> int | Non
             return None
         if db.exec(select(Draft).where(Draft.guest_message_id == last["id"])).first():
             return None  # already drafted for this message
+        from .db import ConvoState
+
+        st = db.get(ConvoState, summary["id"])
+        if st and st.handled_message_id == last["id"]:
+            return None  # you marked this one as already replied
         if open_draft:
             open_draft.status, open_draft.updated_at = "replaced", utcnow()
             db.add(open_draft)
