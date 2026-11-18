@@ -1,0 +1,17 @@
+Context: This project is intended to create a software that will automatically connect to my user account on hospitable, and respond to guests automatically utilizing AI. This will be hosted initially on my personal computer which will always be ON. Later, I plan on moving the app to the cloud.
+
+The app shall be called Savannah and it has two main purposes. 
+
+1) Auto-reply to guests using AI, and based on past-guest message responses - AI will be responsible for suggesting the best guest response based on a folder on my computer with all past conversations and the way I responded in the past. Every new response is added to the same folder, that way it's always self-improving automatically. There should be two modes: Suggested replies (default), and Auto-replies. Auto-replies will be enabled manually and I feel comfortable with how the software is behaving over time.
+
+2) Bookkeeping software. Savannah shall provide bookkeeping capabilities, just like quickbooks. You are replacing quickbooks in fact. The main functions you want to replace are the bank connection and pulling transactions via plaid. I only have one bank account (chase) and one credit card with the same institution, so this should be feasible in the free plaid plan. Other functions needed are: Transaction auto-categorization, the main basic configurable reporting (p and L, statement of cash flows, and etc), and invoice generation. As for invoice generation, they are always manually generated and always payable via bank transfer, zelle, etc. Once paid, I should have a feature to generate a invoice receipt on the software and marking that invoice as paid.
+
+Tech Requirements
+
+1. The app shall run on every platform (mobile, windows, linux, macos, etc).
+2. The app shall be intuitive and simple to navigate.
+3. The app shall be clean and minimalistic.
+4. The app shall be able to import past transactions from quickbooks.
+5. The app shall be able to replicate existing quickbooks chart of accounts.
+6. The app shall be able to create future projected payments based on hospitable bookings (income not realized)
+7. The app shall be able to customize which columns I want added or removed from a report and I shall be able to save that version.

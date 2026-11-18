@@ -1,0 +1,10 @@
+# Your private data (database, guest conversations, keys) — never shared
+data/
+
+# Rebuilt automatically
+.venv/
+__pycache__/
+web/node_modules/
+imports/
+cloudflared-linux-amd64.deb
+web/dist/
